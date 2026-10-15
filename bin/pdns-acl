@@ -1,0 +1,110 @@
+#!/usr/bin/env perl
+package PowerDNS::API::ACL::CLI;
+
+#ABSTRACT: Manage the tokens and grants of PowerDNS::API::ACL
+
+use 5.014;
+use strict;
+use warnings FATAL => 'all';
+use re '/aasx';
+
+use Getopt::Long qw{GetOptionsFromArray};
+use Pod::Usage qw{pod2usage};
+
+use PowerDNS::API::ACL::Store;
+
+=head1 SYNOPSIS
+
+    pdns-acl [--db FILE] token add LABEL
+    pdns-acl [--db FILE] token list
+    pdns-acl [--db FILE] token remove LABEL
+
+    pdns-acl [--db FILE] grant add LABEL --zone ZONE --name NAME [--type TYPE ...] [--write]
+    pdns-acl [--db FILE] grant list LABEL
+    pdns-acl [--db FILE] grant remove ID
+
+=head1 DESCRIPTION
+
+C<token add> prints the secret of the new token.  It is the only time that
+anything shows it, because the database keeps only its digest.
+
+C<grant add> gives a token read access to the records of C<NAME> in C<ZONE>,
+or write access with C<--write>.  C<NAME> is one name, or C<*.> and a name for
+every name below it.  Give C<--type> once for each record type, or leave it out
+for every type.  L<PowerDNS::API::ACL> says what a grant means.
+
+C<grant list> prints each grant with the id that C<grant remove> takes.
+
+=head1 OPTIONS
+
+=over 4
+
+=item --db FILE
+
+The database.  The default is C<$PDNS_ACL_DB>, or
+F</var/lib/pdns-acl/acl.db>.
+
+=back
+
+=cut
+
+our $DEFAULT_DB = '/var/lib/pdns-acl/acl.db';
+
+my %COMMANDS = (
+    'token add' => sub {
+        my ( $store, $label ) = @_;
+        print $store->add_token($label) . "\n";
+        return 0;
+    },
+    'token list' => sub {
+        my ($store) = @_;
+        print join( q{}, map { sprintf( "%s\t%d grants\n", $_->{label}, $_->{grants} ) } $store->tokens );
+        return 0;
+    },
+    'token remove' => sub {
+        my ( $store, $label ) = @_;
+        die "There is no token labelled $label\n" unless $store->remove_token($label);
+        return 0;
+    },
+    'grant add' => sub {
+        my ( $store, $label, @args ) = @_;
+        my %opts = ( type => [] );
+        GetOptionsFromArray( \@args, \%opts, qw{zone=s name=s type=s@ write} ) or pod2usage(2);
+        $store->add_grant(
+            $label,
+            zone   => $opts{zone},
+            name   => $opts{name},
+            types  => @{ $opts{type} } ? $opts{type} : [q{*}],
+            access => $opts{write} ? 'write' : 'read',
+        );
+        return 0;
+    },
+    'grant list' => sub {
+        my ( $store, $label ) = @_;
+        print join( q{}, map { sprintf( "%d\t%s\t%s\t%s\t%s\n", $_->{id}, $_->{access}, $_->{zone}, $_->{name}, join( q{,}, @{ $_->{types} } ) ) } $store->grants($label) );
+        return 0;
+    },
+    'grant remove' => sub {
+        my ( $store, $id ) = @_;
+        die "There is no grant $id\n" unless $store->remove_grant($id);
+        return 0;
+    },
+);
+
+sub main {
+    my @args = @_;
+
+    my %opts = ( db => $ENV{PDNS_ACL_DB} // $DEFAULT_DB );
+    Getopt::Long::Configure('require_order');
+    GetOptionsFromArray( \@args, \%opts, 'db=s', 'help' ) or pod2usage(2);
+    pod2usage(0) if $opts{help};
+
+    my ( $noun, $verb, @rest ) = @args;
+    my $command = $COMMANDS{ join( q{ }, $noun // q{}, $verb // q{} ) } or pod2usage(2);
+
+    return $command->( PowerDNS::API::ACL::Store->new( path => $opts{db} ), @rest );
+}
+
+exit main(@ARGV) unless caller;
+
+1;
