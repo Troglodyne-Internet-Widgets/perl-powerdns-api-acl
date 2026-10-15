@@ -11,6 +11,7 @@ use re '/aasx';
 use Getopt::Long qw{GetOptionsFromArray};
 use Pod::Usage qw{pod2usage};
 
+use PowerDNS::API::ACL::Derived;
 use PowerDNS::API::ACL::Store;
 
 =head1 SYNOPSIS
@@ -22,6 +23,8 @@ use PowerDNS::API::ACL::Store;
     pdns-acl [--db FILE] grant add LABEL GRANT
     pdns-acl [--db FILE] grant list LABEL
     pdns-acl [--db FILE] grant remove ID
+
+    pdns-acl token derive NAME < KEYFILE
 
     GRANT is: --zone ZONE [--name NAME] [--type TYPE ...] [--write | --manage]
 
@@ -39,6 +42,12 @@ with C<--write>.  C<NAME> is one name, or C<*.> and a name for every name below
 it.  Give C<--type> once for each record type, or leave it out for every type.
 C<--manage> lets the token create and delete C<ZONE> itself, and needs no
 C<--name>.  L<PowerDNS::API::ACL> says what a grant means.
+
+C<token derive> prints the token of L<PowerDNS::API::ACL::Derived> for
+C<NAME>, under the key that it reads from its standard input.  It does not
+open the database, because a derived token is not in it.  The key travels on
+standard input, not on the command line, because the command line of a
+process is visible to every user of the host.
 
 C<grant list> prints each grant with the id that C<grant remove> takes.
 C<grant remove> refuses to remove the last grant of a token.  Remove the token
@@ -91,6 +100,15 @@ my %COMMANDS = (
         die "There is no token labelled $label\n" unless $store->remove_token($label);
         return 0;
     },
+    'token derive' => sub {
+        my ( undef, $name ) = @_;
+        die "token derive needs the name that the token is for\n" unless $name;
+        my $key = do { local $/ = undef; <STDIN> } // q{};
+        chomp $key;
+        die "token derive reads the key from its standard input, and got none\n" unless length $key;
+        print PowerDNS::API::ACL::Derived->token_for( $key, $name ) . "\n";
+        return 0;
+    },
     'grant add' => sub {
         my ( $store, $label, @args ) = @_;
         $store->add_grant( $label, %{ $grant_from->(@args) } );
@@ -117,9 +135,11 @@ sub main {
     pod2usage(0) if $opts{help};
 
     my ( $noun, $verb, @rest ) = @args;
-    my $command = $COMMANDS{ join( q{ }, $noun // q{}, $verb // q{} ) } or pod2usage(2);
+    my $name    = join( q{ }, $noun // q{}, $verb // q{} );
+    my $command = $COMMANDS{$name} or pod2usage(2);
 
-    return $command->( PowerDNS::API::ACL::Store->new( path => $opts{db} ), @rest );
+    # A derived token is not in the database, so its command opens none.
+    return $command->( $name eq 'token derive' ? undef : PowerDNS::API::ACL::Store->new( path => $opts{db} ), @rest );
 }
 
 exit main(@ARGV) unless caller;

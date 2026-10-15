@@ -12,6 +12,7 @@ use HTTP::Tiny::UNIX ();
 use Plack::Request   ();
 
 use PowerDNS::API::ACL;
+use PowerDNS::API::ACL::Derived;
 use PowerDNS::API::ACL::Store;
 
 =head1 SYNOPSIS
@@ -67,6 +68,17 @@ C<upstream>.
 
 Seconds to wait for PowerDNS.  The default is 10.
 
+=item C<derive_key>
+
+Optional.  The key of L<PowerDNS::API::ACL::Derived>.  With it, the proxy also
+accepts a token that the key made, and gives it the grants that that class
+describes.
+
+=item C<zones>
+
+The zones in which a derived token gets its grants.  Without C<derive_key> it
+means nothing.
+
 =back
 
 =cut
@@ -78,6 +90,7 @@ sub new {
         die "PowerDNS::API::ACL::Proxy needs $required\n" unless $opts{$required};
     }
     my $store = $opts{store} // PowerDNS::API::ACL::Store->new( path => $opts{db} // die "PowerDNS::API::ACL::Proxy needs db or store\n" );
+    $store = PowerDNS::API::ACL::Derived->new( key => $opts{derive_key}, zones => $opts{zones}, fallback => $store ) if $opts{derive_key};
 
     # HTTP::Tiny::UNIX reads http: followed by a socket path, then the path of
     # the request after a second slash.

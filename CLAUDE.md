@@ -40,6 +40,7 @@ if you raise or lower the floor, change the profile as well as the `use` lines.
 | `dist.ini` | the build, and what has to be installed to run it |
 
 | `perldoc PowerDNS::API::ACL::Proxy` | how to serve it, and what it sends to PowerDNS |
+| `perldoc PowerDNS::API::ACL::Derived` | the tokens that a key makes without the server |
 | `perldoc bin/pdns-acl` | how an operator manages tokens and grants |
 
 ## Finishing a changeset

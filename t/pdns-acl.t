@@ -11,6 +11,7 @@ use FindBin       ();
 use File::Temp    qw{tempdir};
 use Capture::Tiny qw{capture};
 
+use PowerDNS::API::ACL::Derived;
 use PowerDNS::API::ACL::Store;
 
 # A program has a path rather than a module name.
@@ -58,5 +59,21 @@ like( dies { run( qw{grant remove}, $id ) }, qr/no[ ]grant/, 'and refuses one th
 is( $exit,                                 0,  'token remove succeeds' );
 is( [ $store->grants_for_token($secret) ], [], 'and the secret opens nothing after it' );
 like( dies { run(qw{token remove web}) }, qr/no[ ]token[ ]labelled[ ]web/, 'a token that is gone is refused' );
+
+subtest 'token derive' => sub {
+    my ( $out, $err, $code );
+    {
+        local *STDIN;
+        open( STDIN, '<', \"the-derive-key\n" ) or die "Cannot read a scalar: $!";
+        ( $out, $err, $code ) = run( qw{token derive}, "web.$ZONE" );
+    }
+    is( $code, 0,                                                                              'succeeds' );
+    is( $out,  PowerDNS::API::ACL::Derived->token_for( 'the-derive-key', "web.$ZONE" ) . "\n", 'and prints the token of the name under the key on its standard input, without its newline' );
+
+    local *STDIN;
+    open( STDIN, '<', \q{} ) or die "Cannot read a scalar: $!";
+    like( dies { run( qw{token derive}, "web.$ZONE" ) }, qr/got[ ]none/,         'and refuses no key' );
+    like( dies { run(qw{token derive}) },                qr/needs[ ]the[ ]name/, 'or no name' );
+};
 
 done_testing;

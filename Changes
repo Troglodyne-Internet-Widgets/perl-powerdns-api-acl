@@ -1,5 +1,11 @@
 Revision history for PowerDNS-API-ACL
 
+0.003 2026-10-15 TEODESIAN
+    - Accept a token that a key derives from a name, so that whoever keeps the
+      key can give a host a token without asking the server: see
+      PowerDNS::API::ACL::Derived, the derive_key and zones options of the
+      proxy, and pdns-acl token derive
+
 0.002 2026-10-15 TEODESIAN
     - Reach PowerDNS over a unix socket with no keep-alive: HTTP::Tiny 0.096
       checks a kept connection with peerhost, which HTTP::Tiny::UNIX lacks,

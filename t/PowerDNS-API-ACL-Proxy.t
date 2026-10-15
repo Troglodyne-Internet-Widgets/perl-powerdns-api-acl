@@ -14,6 +14,7 @@ use HTTP::Request::Common qw{GET PUT};
 use HTTP::Request         ();
 use Cpanel::JSON::XS      ();
 
+use PowerDNS::API::ACL::Derived;
 use PowerDNS::API::ACL::Proxy;
 
 {
@@ -105,6 +106,18 @@ subtest 'PowerDNS that does not answer is a bad gateway, not a refusal' => sub {
     my $res = app_for()->request( PUT "$PATH/notify", 'X-API-Key' => 'web' );
     is( $res->code, 502, 'a 502' );
     like( $JSON->decode( $res->content )->{error}, qr/did[ ]not[ ]answer:[ ]Could[ ]not[ ]connect/, 'saying why' );
+};
+
+subtest 'a token that derive_key made' => sub {
+    @asked  = ();
+    %answer = ( status => 204, success => 1, headers => {}, content => q{} );
+    my $token = PowerDNS::API::ACL::Derived->token_for( 'the-derive-key', "db.$ZONE" );
+    my $body  = $JSON->encode( { rrsets => [ { name => "db.$ZONE", type => 'A', changetype => 'REPLACE' } ] } );
+    my $req   = HTTP::Request->new( PATCH => $PATH, [ 'X-API-Key' => $token, 'Content-Type' => 'application/json' ], $body );
+
+    is( app_for()->request($req)->code,                                                                                         401, 'is unknown to a proxy without the key' );
+    is( app_for( derive_key => 'the-derive-key', zones => [$ZONE] )->request($req)->code,                                       204, 'and writes its own name through a proxy with it' );
+    is( patch( 'web', $JSON->encode( { rrsets => [ { name => "web.$ZONE", type => 'A', changetype => 'REPLACE' } ] } ) )->code, 204, 'beside a token of the store' );
 };
 
 subtest 'new names what it is missing' => sub {

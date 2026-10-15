@@ -38,6 +38,8 @@ records of a set of names in one zone.  L<PowerDNS::API::ACL::Proxy> is a PSGI
 application that checks each request against the grants, and passes only
 allowed requests to PowerDNS with the real key.  L<PowerDNS::API::ACL::Store>
 keeps the tokens and the grants in SQLite, and C<pdns-acl> manages them.
+L<PowerDNS::API::ACL::Derived> checks a token that a key made from a name,
+which the server needs no record of.
 
 This module is the decision.  It knows the requests that a record client makes,
 which are the calls that dns-lexicon makes:
