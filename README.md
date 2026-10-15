@@ -4,7 +4,7 @@ PowerDNS::API::ACL - Per-token access control in front of the PowerDNS HTTP API
 
 # VERSION
 
-version 0.001
+version 0.002
 
 # SYNOPSIS
 

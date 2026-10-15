@@ -83,11 +83,13 @@ sub new {
     # the request after a second slash.
     my $base = index( $opts{upstream}, q{/} ) == 0 ? "http:$opts{upstream}/" : $opts{upstream} =~ s{/+\z}{}r;
 
+    # No keep_alive: HTTP::Tiny checks a kept connection with peerhost, which a
+    # unix socket does not have, and a connection to one costs next to nothing.
     return bless {
         acl     => PowerDNS::API::ACL->new( store => $store ),
         base    => $base,
         api_key => $opts{api_key},
-        http    => HTTP::Tiny::UNIX->new( timeout => $opts{timeout} // 10 ),
+        http    => HTTP::Tiny::UNIX->new( keep_alive => 0, timeout => $opts{timeout} // 10 ),
     }, $class;
 }
 
