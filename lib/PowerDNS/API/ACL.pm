@@ -60,10 +60,19 @@ a PATCH as one change.
 
 Allowed when the token can write anything in the zone.
 
+=item C<POST /api/v1/servers/:server/zones>
+
+Creates the zone that the body names.  Allowed when the token has a C<manage>
+grant for that zone.
+
+=item C<DELETE /api/v1/servers/:server/zones/:zone>
+
+Allowed when the token has a C<manage> grant for the zone.
+
 =back
 
-Every other request is refused.  That includes the list of zones, the creation
-and deletion of a zone, search, and the configuration of the server.
+Every other request is refused.  That includes the list of zones, a change to
+the settings of a zone, search, and the configuration of the server.
 
 =head2 Grants
 
@@ -89,11 +98,33 @@ every type.
 
 =item C<access>
 
-C<read> or C<write>.  A write grant also lets the token read.
+C<read>, C<write> or C<manage>.  A write grant also lets the token read.  A
+manage grant lets the token create and delete the zone, and nothing else: it
+reads and writes no record.  Its name is the zone, and its types are C<*>.
 
 =back
 
 Names compare without regard to case, and always with the trailing dot.
+
+A token that needs its own records gets two grants: its name, and C<*.> and
+its name, which covers the names below it, such as the C<_acme-challenge>
+record of its certificate.
+
+=head2 Limitations
+
+=over 4
+
+=item * A grant cannot restrict the content of a record.  A token that may
+write the A records of a name can point that name at any address.  Every DNS
+provider works this way.
+
+=item * There are no rules that deny, and no default other than refusal.  A
+token can do what its grants allow, and nothing else.
+
+=item * A grant cannot let a token change the settings of a zone, such as its
+kind or its masters, or rectify or export it.
+
+=back
 
 =cut
 
@@ -169,7 +200,17 @@ sub authorize {
     my @grants = $self->{store}->grants_for_token( $req{token} // q{} );
     return $refuse->( 401, 'Unknown API key' ) unless @grants;
 
-    my ( $zone, $notify ) = ( $req{path} // q{} ) =~ m{\A/api/v1/servers/[^/]+/zones/([^/]+?)(/notify)?/?\z};
+    my $method = uc( $req{method} // q{} );
+    my $path   = $req{path} // q{};
+
+    # Creating a zone names it in the body, not in the path.
+    if ( $path =~ m{\A/api/v1/servers/[^/]+/zones/?\z} ) {
+        my $new = ref $req{body} eq 'HASH' ? __PACKAGE__->canonical_name( $req{body}{name} ) : q{.};
+        return { allow => 1 } if $method eq 'POST' && any { $_->{access} eq 'manage' && __PACKAGE__->canonical_name( $_->{zone} ) eq $new } @grants;
+        return $refuse->( 403, $method eq 'POST' ? "This key cannot create the zone $new" : 'This key cannot list zones' );
+    }
+
+    my ( $zone, $notify ) = $path =~ m{\A/api/v1/servers/[^/]+/zones/([^/]+?)(/notify)?/?\z};
     return $refuse->( 403, 'Only the records of a zone are open to this key' ) unless defined $zone;
 
     # PowerDNS escapes a byte of a zone id as =XX, so a slash in a classless
@@ -179,13 +220,17 @@ sub authorize {
     my @in_zone = grep { __PACKAGE__->canonical_name( $_->{zone} ) eq $zone } @grants;
     return $refuse->( 403, "This key has no grant in $zone" ) unless @in_zone;
 
-    my $method = uc( $req{method} // q{} );
-    my @write  = grep { $_->{access} eq 'write' } @in_zone;
+    my @write = grep { $_->{access} eq 'write' } @in_zone;
 
+    my $manages = any { $_->{access} eq 'manage' } @in_zone;
+    if ( $method eq 'DELETE' && !$notify ) {    ## no critic (ValuesAndExpressions::PreventSQLInjection) -- an HTTP method, not SQL
+        return $manages ? { allow => 1 } : $refuse->( 403, "Removing the zone $zone is not open to this key" );
+    }
     if ($notify) {
         return $method eq 'PUT' && @write ? { allow => 1 } : $refuse->( 403, "This key cannot notify for $zone" );
     }
-    return { allow => 1, filter => \@in_zone } if $method eq 'GET';
+    my @readable = grep { $_->{access} ne 'manage' } @in_zone;
+    return { allow => 1, filter => \@readable } if $method eq 'GET' && @readable;
     return $refuse->( 403, "This key cannot $method $zone" ) unless $method eq 'PATCH';
 
     my $rrsets = ref $req{body} eq 'HASH' ? $req{body}{rrsets} : undef;

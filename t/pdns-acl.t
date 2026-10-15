@@ -25,24 +25,29 @@ sub run {
     return ( $out, $err, $exit );
 }
 
-my ( $secret, undef, $exit ) = run(qw{token add web});
-is( $exit, 0, 'token add succeeds' );
-chomp $secret;
-ok( length $secret, 'and prints the secret' );
+like( dies { run(qw{token add web}) }, qr/needs[ ]--zone/, 'token add without a grant is refused' );
 
-( undef, undef, $exit ) = run( qw{grant add web --zone}, $ZONE, '--name', "web.$ZONE", qw{--type A --type AAAA --write} );
+my ( $secret, $exit );
+( $secret, undef, $exit ) = run( qw{token add web --zone}, $ZONE, '--name', "web.$ZONE", qw{--type A --type AAAA --write} );
+is( $exit, 0, 'token add with its first grant succeeds' );
+chomp $secret;
+ok( $secret, 'and prints the secret' );
+
+( undef, undef, $exit ) = run( qw{grant add web --zone}, $ZONE, '--name', "*.$ZONE" );
 is( $exit, 0, 'grant add succeeds' );
-run( qw{grant add web --zone}, $ZONE, '--name', "*.$ZONE" );
+( undef, undef, $exit ) = run( qw{grant add web --zone}, $ZONE, '--manage' );
+is( $exit, 0, 'and adds a manage grant, which needs no name' );
 
 my ($list) = run(qw{grant list web});
 like( $list, qr/^\d+\twrite\t\Q$ZONE\E\tweb[.]\Q$ZONE\E\tA,AAAA$/m, 'grant list shows the write grant with its types' );
 like( $list, qr/^\d+\tread\t\Q$ZONE\E\t[*][.]\Q$ZONE\E\t[*]$/m,     'and the read grant, for every type' );
+like( $list, qr/^\d+\tmanage\t\Q$ZONE\E\t\Q$ZONE\E\t[*]$/m,         'and the manage grant, for the zone itself' );
 
 my $store = PowerDNS::API::ACL::Store->new( path => $db );
-is( scalar $store->grants_for_token($secret), 2, 'the secret it printed opens those grants' );
+is( scalar $store->grants_for_token($secret), 3, 'the secret it printed opens those grants' );
 
 my ($tokens) = run(qw{token list});
-is( $tokens, "web\t2 grants\n", 'token list counts them' );
+is( $tokens, "web\t3 grants\n", 'token list counts them' );
 
 my ($id) = $list =~ m/^(\d+)\twrite/m;
 ( undef, undef, $exit ) = run( qw{grant remove}, $id );
