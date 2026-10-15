@@ -57,8 +57,17 @@ which are the calls that dns-lexicon makes:
 
     Allowed when the token can write anything in the zone.
 
-Every other request is refused.  That includes the list of zones, the creation
-and deletion of a zone, search, and the configuration of the server.
+- `POST /api/v1/servers/:server/zones`
+
+    Creates the zone that the body names.  Allowed when the token has a `manage`
+    grant for that zone.
+
+- `DELETE /api/v1/servers/:server/zones/:zone`
+
+    Allowed when the token has a `manage` grant for the zone.
+
+Every other request is refused.  That includes the list of zones, a change to
+the settings of a zone, search, and the configuration of the server.
 
 ## Grants
 
@@ -82,9 +91,25 @@ A grant has four parts:
 
 - `access`
 
-    `read` or `write`.  A write grant also lets the token read.
+    `read`, `write` or `manage`.  A write grant also lets the token read.  A
+    manage grant lets the token create and delete the zone, and nothing else: it
+    reads and writes no record.  Its name is the zone, and its types are `*`.
 
 Names compare without regard to case, and always with the trailing dot.
+
+A token that needs its own records gets two grants: its name, and `*.` and
+its name, which covers the names below it, such as the `_acme-challenge`
+record of its certificate.
+
+## Limitations
+
+- A grant cannot restrict the content of a record.  A token that may
+write the A records of a name can point that name at any address.  Every DNS
+provider works this way.
+- There are no rules that deny, and no default other than refusal.  A
+token can do what its grants allow, and nothing else.
+- A grant cannot let a token change the settings of a zone, such as its
+kind or its masters, or rectify or export it.
 
 # METHODS
 
@@ -116,6 +141,15 @@ grants that `filter_zone` needs for the response.
 Takes the decoded response to a GET of a zone and the `filter` that
 `authorize` returned, and removes each rrset that none of the grants covers.
 Changes `$zone` in place and returns it.  A class method.
+
+# BUGS
+
+Please report any bugs or feature requests on the bugtracker website
+[https://github.com/Troglodyne-Internet-Widgets/perl-powerdns-api-acl/issues](https://github.com/Troglodyne-Internet-Widgets/perl-powerdns-api-acl/issues)
+
+When submitting a bug or request, please include a test-file or a
+patch to an existing test-file that illustrates the bug or desired
+feature.
 
 # AUTHORS
 

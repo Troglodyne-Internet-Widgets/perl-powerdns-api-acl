@@ -28,6 +28,7 @@ my $acl = PowerDNS::API::ACL->new(
         web    => [ { zone => $ZONE, name => "web.$ZONE",   types => [qw{A AAAA}], access => 'write' }, { zone => $ZONE, name => "_acme-challenge.web.$ZONE", types => ['TXT'], access => 'write' } ],
         reader => [ { zone => $ZONE, name => "*.$ZONE",     types => ['*'],        access => 'read' } ],
         apex   => [ { zone => $ZONE, name => "*.svc.$ZONE", types => ['*'],        access => 'write' } ],
+        owner  => [ { zone => $ZONE, name => $ZONE,         types => ['*'],        access => 'manage' } ],
     ),
 );
 
@@ -107,6 +108,23 @@ subtest 'notify needs write access to the zone' => sub {
     ok( $acl->authorize( token => 'web',    method => 'PUT', path => "$PATH/notify" )->{allow}, 'a key that may write' );
     is( $acl->authorize( token => 'reader', method => 'PUT', path => "$PATH/notify" )->{allow}, 0, 'not one that may only read' );
     is( $acl->authorize( token => 'web',    method => 'GET', path => "$PATH/notify" )->{allow}, 0, 'and only by PUT' );
+};
+
+subtest 'a manage grant creates and deletes its zone, and nothing else' => sub {
+    my $zones = '/api/v1/servers/localhost/zones';
+
+    ok( $acl->authorize( token => 'owner', method => 'POST', path => $zones, body => { name => 'Lab.test.test', kind => 'Native' } )->{allow}, 'it creates its zone, however the body spells it' );
+    ok( $acl->authorize( token => 'owner', method => 'DELETE', path => $PATH )->{allow}, 'and deletes it' );
+
+    is( $acl->authorize( token => 'owner', method => 'POST', path => $zones, body => { name => 'other.test.test.' } )->{allow}, 0, 'not another zone' );
+    is( $acl->authorize( token => 'owner', method => 'POST', path => $zones )->{allow},                                         0, 'nor a zone that the body does not name' );
+    is( $acl->authorize( token => 'owner', method => 'GET', path => $zones )->{allow},                                          0, 'nor the list of zones' );
+    is( $acl->authorize( token => 'owner', method => 'GET', path => $PATH )->{allow},                                           0, 'it reads no record' );
+    is( patch( 'owner', [ "web.$ZONE", 'A' ] )->{allow},                                                                        0, 'and writes none' );
+    is( $acl->authorize( token => 'owner', method => 'PUT', path => $PATH, body => { kind => 'Master' } )->{allow},             0, 'nor changes the settings of the zone' );
+
+    is( $acl->authorize( token => 'web', method => 'DELETE', path => $PATH )->{allow}, 0, 'a key that may write records cannot delete the zone' );
+    is( $acl->authorize( token => 'web', method => 'POST', path => $zones, body => { name => $ZONE } )->{allow}, 0, 'nor create it' );
 };
 
 subtest 'a zone id escaped as PowerDNS escapes it' => sub {
