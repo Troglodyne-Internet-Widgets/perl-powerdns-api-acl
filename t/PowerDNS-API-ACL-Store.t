@@ -10,6 +10,7 @@ use Test2::Plugin::NoWarnings;    ## no critic (ProhibitUnusedImports)
 use FindBin::libs;
 use File::Temp  qw{tempdir};
 use Digest::SHA qw{sha256_hex};
+use POSIX       ();
 
 use PowerDNS::API::ACL::Store;
 
@@ -30,7 +31,13 @@ subtest 'a token is a secret that the store keeps only a salted digest of' => su
     like( $secret, qr/\A[\w-]{40,}\z/, 'the secret is long and URL-safe' );
     isnt( $store->add_token( 'db', {%OWN} ), $secret, 'and each token gets its own' );
 
-    my $raw = do { local ( @ARGV, $/ ) = $path; <> };
+    # In WAL mode a commit lands in the -wal file until a checkpoint copies it.
+    my $raw = join(
+        q{},
+        map {
+            do { local ( @ARGV, $/ ) = $_; <> }
+        } grep { -e } ( $path, "$path-wal" )
+    );
     ok( index( $raw, $secret ) < 0,                  'the database does not hold the secret' );
     ok( index( $raw, sha256_hex($secret) ) < 0,      'nor its unsalted digest' );
     ok( index( $raw, $store->digest($secret) ) >= 0, 'only the salted one' );
@@ -97,8 +104,68 @@ subtest 'removing a token takes its grants with it, and its last grant cannot go
 
     # A second connection, as the proxy and pdns-acl each have, sees the same.
     my $again = PowerDNS::API::ACL::Store->new( path => $path );
-    my $count = $again->{dbh}->selectrow_array('SELECT COUNT(*) FROM grants');
+    my $count = $again->dbh->selectrow_array('SELECT COUNT(*) FROM grants');
     is( $count, 0, 'no grant of it is left in the database' );
+};
+
+subtest 'the database is set up for more than one writer' => sub {
+    my ($store) = fresh();
+    my $dbh = $store->dbh;
+
+    is( $dbh->selectrow_array('PRAGMA journal_mode'), 'wal', 'WAL, so a reader does not wait for a writer' );
+    is( $dbh->selectrow_array('PRAGMA busy_timeout'), 5000,  'a lock is waited for, for five seconds' );
+    is( $dbh->selectrow_array('PRAGMA synchronous'),  1,     'and a commit syncs as NORMAL does' );
+
+    like( dies { PowerDNS::API::ACL::Store->new( path => ':memory:' ) }, qr/in[ ]memory[ ]mode,[ ]not[ ]WAL/, 'a database that cannot be in WAL mode is refused' );
+};
+
+subtest 'writers in several processes at once all succeed' => sub {
+    my ( undef,    $path ) = fresh();
+    my ( $writers, $each ) = ( 4, 25 );
+
+    my @pids;
+    foreach my $writer ( 1 .. $writers ) {
+        my $pid = fork() // die "fork: $!";
+        if ( !$pid ) {
+            my $ok = eval {
+                my $store = PowerDNS::API::ACL::Store->new( path => $path );
+                foreach my $n ( 1 .. $each ) {
+                    $store->add_token( "w$writer-$n", {%OWN}, { zone => $ZONE, name => "*.w$writer.$ZONE", access => 'write' } );
+                    my ($grant) = $store->grants("w$writer-$n");
+                    $store->remove_grant( $grant->{id} );
+                }
+                1;
+            };
+            warn $@ unless $ok;
+            POSIX::_exit( $ok ? 0 : 1 );
+        }
+        push( @pids, $pid );
+    }
+    my @failed = grep { waitpid( $_, 0 ) && $? } @pids;
+
+    is( scalar @failed, 0, "each of $writers writers made and changed its tokens" );
+    my @tokens = PowerDNS::API::ACL::Store->new( path => $path )->tokens;
+    is( scalar @tokens,                         $writers * $each, 'and every token is there' );
+    is( [ grep { $_->{grants} != 1 } @tokens ], [],               'each with the one grant that is left' );
+};
+
+subtest 'a store made before a fork opens a connection of its own in the child' => sub {
+    my ($store) = fresh();
+    my $parent = $store->dbh;
+
+    # What a preforking PSGI server does: load the application, then fork.
+    my $pid = fork() // die "fork: $!";
+    if ( !$pid ) {
+        my $ok = eval { $store->dbh != $parent && $store->add_token( 'child', {%OWN} ) };
+        warn $@ unless $ok;
+        POSIX::_exit( $ok ? 0 : 1 );
+    }
+    waitpid( $pid, 0 );
+
+    is( $?,          0,       'the child wrote through a connection that is not its parent' );
+    is( $store->dbh, $parent, 'the parent keeps its own' );
+    ok( $store->add_token( 'parent', {%OWN} ), 'and it still works after the child is gone' );
+    is( [ map { $_->{label} } $store->tokens ], [qw{child parent}], 'both writes are in the database' );
 };
 
 like( dies { PowerDNS::API::ACL::Store->new }, qr/needs[ ]a[ ]path/, 'new refuses to run without a path' );

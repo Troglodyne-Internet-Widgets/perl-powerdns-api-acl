@@ -68,25 +68,67 @@ my @SCHEMA = (
 Opens the database at C<$path>.  If it is new, creates its tables and its
 salt.
 
+The proxy and C<pdns-acl> each open the database, and more than one of them can
+write at once.  So the database is in WAL mode, and a connection waits up to
+five seconds for a lock before it gives up.  Dies when SQLite will not use WAL,
+as for a database in memory.
+
 =cut
 
 sub new {
     my ( $class, %opts ) = @_;
     die "PowerDNS::API::ACL::Store needs a path\n" unless defined $opts{path};
 
-    my $dbh = DBI->connect( "dbi:SQLite:dbname=$opts{path}", q{}, q{}, { RaiseError => 1, PrintError => 0, AutoCommit => 1, sqlite_unicode => 1 } );
+    my $self = bless { path => $opts{path} }, $class;
+    my $dbh  = $self->dbh;
+
+    # OR IGNORE, so that the first connection makes the salt and every later
+    # one keeps it.
+    $dbh->do( q{INSERT OR IGNORE INTO settings (name, value) VALUES ('salt', ?)}, undef, random_bytes_b64u(32) );
+    ( $self->{salt} ) = $dbh->selectrow_array(q{SELECT value FROM settings WHERE name = 'salt'});
+
+    return $self;
+}
+
+=method dbh()
+
+Returns the connection to the database, and opens it first if this process
+has none.
+
+A PSGI server that forks its workers after it loads the application would
+otherwise hand each worker the connection of its parent, and SQLite forbids a
+connection that two processes use.  So the store remembers the process that
+opened its connection, and a forked process opens its own.
+
+=cut
+
+sub dbh {
+    my ($self) = @_;
+    return $self->{dbh} if $self->{dbh} && $self->{pid} == $$;
+
+    # AutoInactiveDestroy, so that a forked process that drops the connection
+    # of its parent does not close it under the parent.
+    my $dbh = DBI->connect( "dbi:SQLite:dbname=$self->{path}", q{}, q{}, { RaiseError => 1, PrintError => 0, AutoCommit => 1, AutoInactiveDestroy => 1, sqlite_unicode => 1 } );
+
+    # The timeout first, because each statement after it can wait on a lock.
+    $dbh->do('PRAGMA busy_timeout = 5000');
+
+    # WAL lets readers go on while one connection writes.  SQLite answers with
+    # the mode it is in, which is not WAL where it cannot be.
+    my ($mode) = $dbh->selectrow_array('PRAGMA journal_mode = WAL');
+    die "SQLite keeps $self->{path} in $mode mode, not WAL, so its writers would block its readers\n" unless lc($mode) eq 'wal';
+
+    # NORMAL is safe in WAL mode: a crash can lose the last commits, but it
+    # cannot corrupt the database.
+    $dbh->do('PRAGMA synchronous = NORMAL');
 
     # SQLite enforces a foreign key only when each connection asks it to, and
     # the cascade is what removes the grants of a removed token.
     $dbh->do('PRAGMA foreign_keys = ON');
     $dbh->do($_) foreach @SCHEMA;
 
-    # OR IGNORE, so that the first connection makes the salt and every later
-    # one keeps it.
-    $dbh->do( q{INSERT OR IGNORE INTO settings (name, value) VALUES ('salt', ?)}, undef, random_bytes_b64u(32) );
-    my ($salt) = $dbh->selectrow_array(q{SELECT value FROM settings WHERE name = 'salt'});
-
-    return bless { dbh => $dbh, salt => $salt }, $class;
+    @{$self}{qw{dbh pid}} = ( $dbh, $$ );
+    return $dbh;
 }
 
 =method digest($secret)
@@ -112,14 +154,14 @@ invalid.  Then it makes nothing.
 
 sub add_token {
     my ( $self, $label, @grants ) = @_;
-    die "A token needs a label\n" unless $label;
-    die "There is already a token labelled $label\n" if $self->token_id($label);
+    die "A token needs a label\n"                                                unless $label;
     die "A token with no grant could do nothing, so $label needs at least one\n" unless @grants;
 
     my $secret = random_bytes_b64u(32);
     $self->transaction(
         sub {
-            $self->{dbh}->do( 'INSERT INTO tokens (label, digest, created) VALUES (?, ?, ?)', undef, $label, $self->digest($secret), time );
+            die "There is already a token labelled $label\n" if $self->token_id($label);
+            $self->dbh->do( 'INSERT INTO tokens (label, digest, created) VALUES (?, ?, ?)', undef, $label, $self->digest($secret), time );
             $self->add_grant( $label, %$_ ) foreach @grants;
         }
     );
@@ -135,7 +177,7 @@ Removes the token and its grants.  Returns true when there was one.
 
 sub remove_token {
     my ( $self, $label ) = @_;
-    return $self->{dbh}->do( 'DELETE FROM tokens WHERE label = ?', undef, $label ) > 0 ? 1 : 0;
+    return $self->dbh->do( 'DELETE FROM tokens WHERE label = ?', undef, $label ) > 0 ? 1 : 0;
 }
 
 =method tokens()
@@ -148,7 +190,7 @@ and C<grants> (how many), sorted by label.
 sub tokens {
     my ($self) = @_;
     return @{
-        $self->{dbh}->selectall_arrayref(
+        $self->dbh->selectall_arrayref(
             'SELECT t.label, t.created, COUNT(g.id) AS grants FROM tokens t LEFT JOIN grants g ON g.token_id = t.id GROUP BY t.id ORDER BY t.label',
             { Slice => {} },
         )
@@ -163,7 +205,7 @@ Returns the row id of the token with this label, or undef.
 
 sub token_id {
     my ( $self, $label ) = @_;
-    my ($id) = $self->{dbh}->selectrow_array( 'SELECT id FROM tokens WHERE label = ?', undef, $label );
+    my ($id) = $self->dbh->selectrow_array( 'SELECT id FROM tokens WHERE label = ?', undef, $label );
     return $id;
 }
 
@@ -198,7 +240,7 @@ sub add_grant {
     die "$name is not in the zone $zone\n" unless $bare eq $zone || substr( $bare, -length ".$zone" ) eq ".$zone";
 
     my $types = $access eq 'manage' ? q{*} : join( q{,}, map { uc } @{ $grant{types} // [q{*}] } );
-    $self->{dbh}->do( 'INSERT OR IGNORE INTO grants (token_id, zone, name, types, access) VALUES (?, ?, ?, ?, ?)', undef, $token, $zone, $name, $types, $access );
+    $self->dbh->do( 'INSERT OR IGNORE INTO grants (token_id, zone, name, types, access) VALUES (?, ?, ?, ?, ?)', undef, $token, $zone, $name, $types, $access );
 
     return 1;
 }
@@ -213,11 +255,19 @@ when there was one.  Dies when it is the last grant of its token.
 sub remove_grant {
     my ( $self, $id ) = @_;
 
-    my ( $label, $count ) = $self->{dbh}->selectrow_array( 'SELECT t.label, (SELECT COUNT(*) FROM grants o WHERE o.token_id = g.token_id) FROM grants g JOIN tokens t ON t.id = g.token_id WHERE g.id = ?', undef, $id );
-    return 0 unless defined $label;
-    die "Grant $id is the last grant of the token $label, which could then do nothing.  Remove the token instead.\n" if $count < 2;
+    # One transaction, so that two removals at once cannot each see a second
+    # grant and between them remove both.
+    my $removed = 0;
+    $self->transaction(
+        sub {
+            my ( $label, $count ) = $self->dbh->selectrow_array( 'SELECT t.label, (SELECT COUNT(*) FROM grants o WHERE o.token_id = g.token_id) FROM grants g JOIN tokens t ON t.id = g.token_id WHERE g.id = ?', undef, $id );
+            return unless defined $label;
+            die "Grant $id is the last grant of the token $label, which could then do nothing.  Remove the token instead.\n" if $count < 2;
+            $removed = $self->dbh->do( 'DELETE FROM grants WHERE id = ?', undef, $id ) > 0 ? 1 : 0;
+        }
+    );
 
-    return $self->{dbh}->do( 'DELETE FROM grants WHERE id = ?', undef, $id ) > 0 ? 1 : 0;
+    return $removed;
 }
 
 =method grants($label)
@@ -255,7 +305,7 @@ C<grants> describes it.
 
 sub select_grants {
     my ( $self, $sql, @bind ) = @_;
-    my $rows = $self->{dbh}->selectall_arrayref( $sql, { Slice => {} }, @bind );
+    my $rows = $self->dbh->selectall_arrayref( $sql, { Slice => {} }, @bind );
     $_->{types} = [ split m/,/, $_->{types} ] foreach @$rows;
     return @$rows;
 }
@@ -265,12 +315,16 @@ sub select_grants {
 Runs C<$code> in one transaction, and rolls it back if C<$code> dies.  Dies
 with what C<$code> died with.
 
+DBD::SQLite begins a transaction with C<BEGIN IMMEDIATE>, which takes the
+write lock at once.  So C<$code> can read and then write without another
+writer in between, and the wait for the lock is the C<busy_timeout>.
+
 =cut
 
 sub transaction {
     my ( $self, $code ) = @_;
 
-    my $dbh = $self->{dbh};
+    my $dbh = $self->dbh;
     $dbh->begin_work;
     my $ok    = eval { $code->(); 1 };
     my $error = $@;

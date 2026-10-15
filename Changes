@@ -5,3 +5,5 @@ Revision history for PowerDNS-API-ACL
     - Salt the digests of the tokens with a salt that each database makes
     - A manage grant creates and deletes one zone, and nothing else
     - Refuse to make a token without a grant, or to remove its last grant
+    - Keep the database in WAL mode, and wait for a lock, for writers in several processes
+    - Open a connection of its own in each process, for a PSGI server that forks
